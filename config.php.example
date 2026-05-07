@@ -1,0 +1,13 @@
+<?php
+/**
+ * CONFIGURACIÓN DE EJEMPLO
+ * Renombra este archivo a config.php y completa tus datos.
+ */
+
+define('DB_HOST', 'localhost');
+define('DB_NAME', 'tu_base_de_datos');
+define('DB_USER', 'tu_usuario');
+define('DB_PASS', 'tu_contraseña');
+
+define('APP_USER', 'admin'); 
+define('APP_PASS', 'cambiame123');

@@ -4,14 +4,15 @@
  * Optimizado para Hosting compartido (Webempresa)
  */
 
-// 1. CONFIGURACIÓN (Modificar estos datos en el hosting)
+// 1. CONFIGURACIÓN (Cargada desde config.php)
+if (file_exists('config.php')) {
+    require_once 'config.php';
+} else {
+    die("Error: No se encontró el archivo config.php. Por favor, crea uno basado en config.php.example");
+}
 date_default_timezone_set('America/Argentina/Buenos_Aires');
-define('DB_HOST', 'localhost');
-define('DB_NAME', 'marketca_caja_diaria');
-define('DB_USER', 'marketca_caja_diaria');
-define('DB_PASS', 'aTBlg1vcpf!');
-define('APP_USER', 'admin'); // Usuario para login
-define('APP_PASS', 'aTBlg1vcpf!'); // Contraseña para login
+
+
 
 session_start();
 
