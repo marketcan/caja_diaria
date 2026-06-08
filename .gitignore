@@ -4,3 +4,4 @@ config.php
 # Archivos temporales de SO
 .DS_Store
 Thumbs.db
+*.exe

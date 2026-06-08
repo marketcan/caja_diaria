@@ -86,8 +86,21 @@ if ($is_logged_in && !isset($db_error)) {
     // b. Exportar a Excel (CSV)
     if (isset($_GET['export'])) {
         $filter_date = $_GET['filter_date'] ?? null;
-        $where_sql = $filter_date ? "WHERE DATE(fecha) = :fdate" : "";
-        $params = $filter_date ? [':fdate' => $filter_date] : [];
+        $search_text = $_GET['search_text'] ?? null;
+        
+        $where_clauses = [];
+        $params = [];
+        
+        if ($filter_date) {
+            $where_clauses[] = "DATE(fecha) = :fdate";
+            $params[':fdate'] = $filter_date;
+        }
+        if (!empty($search_text)) {
+            $where_clauses[] = "concepto LIKE :stext";
+            $params[':stext'] = '%' . $search_text . '%';
+        }
+        
+        $where_sql = count($where_clauses) > 0 ? "WHERE " . implode(" AND ", $where_clauses) : "";
 
         // Calcular saldo inicial para el filtro
         $saldo_acumulado = 0;
@@ -136,8 +149,21 @@ if ($is_logged_in && !isset($db_error)) {
 
     // e. Obtener historial y balance filtrado
     $filter_date = $_GET['filter_date'] ?? null;
-    $where_sql = $filter_date ? "WHERE DATE(fecha) = :fdate" : "";
-    $params = $filter_date ? [':fdate' => $filter_date] : [];
+    $search_text = $_GET['search_text'] ?? null;
+    
+    $where_clauses = [];
+    $params = [];
+    
+    if ($filter_date) {
+        $where_clauses[] = "DATE(fecha) = :fdate";
+        $params[':fdate'] = $filter_date;
+    }
+    if (!empty($search_text)) {
+        $where_clauses[] = "concepto LIKE :stext";
+        $params[':stext'] = '%' . $search_text . '%';
+    }
+    
+    $where_sql = count($where_clauses) > 0 ? "WHERE " . implode(" AND ", $where_clauses) : "";
 
     // Dashboard con filtro
     $stmt = $pdo->prepare("SELECT 
@@ -270,17 +296,19 @@ if ($is_logged_in && !isset($db_error)) {
                     <div class="p-6 border-b flex flex-col md:flex-row justify-between items-center gap-4">
                         <h2 class="text-lg font-bold text-gray-800">Operaciones</h2>
                         
-                        <!-- FILTRO POR DÍA -->
-                        <form method="GET" class="flex items-center gap-2">
+                        <!-- FILTROS -->
+                        <form method="GET" class="flex flex-wrap justify-center md:justify-end items-center gap-2 w-full md:w-auto">
+                            <input type="text" name="search_text" placeholder="Buscar..." value="<?php echo htmlspecialchars($search_text ?? ''); ?>" 
+                                   class="px-4 py-2 rounded-xl border border-gray-200 outline-none focus:ring-2 focus:ring-blue-500 text-sm bg-gray-50 w-full md:w-32 lg:w-48">
                             <input type="date" name="filter_date" value="<?php echo $filter_date; ?>" 
-                                   class="px-4 py-2 rounded-xl border border-gray-200 outline-none focus:ring-2 focus:ring-blue-500 text-sm bg-gray-50">
+                                   class="px-4 py-2 rounded-xl border border-gray-200 outline-none focus:ring-2 focus:ring-blue-500 text-sm bg-gray-50 flex-grow md:flex-grow-0">
                             <button type="submit" class="bg-blue-600 text-white px-4 py-2 rounded-xl text-sm font-bold hover:bg-blue-700 transition">
                                 Filtrar
                             </button>
-                            <?php if ($filter_date): ?>
-                                <a href="index.php" class="text-xs text-red-500 font-bold hover:underline">Limpiar</a>
+                            <?php if ($filter_date || !empty($search_text)): ?>
+                                <a href="index.php" class="text-xs text-red-500 font-bold hover:underline px-2">Limpiar</a>
                             <?php endif; ?>
-                            <a href="?export=1<?php echo $filter_date ? '&filter_date=' . $filter_date : ''; ?>" 
+                            <a href="?export=1<?php echo $filter_date ? '&filter_date=' . urlencode($filter_date) : ''; ?><?php echo !empty($search_text) ? '&search_text=' . urlencode($search_text) : ''; ?>" 
                                class="text-sm bg-green-100 text-green-700 px-4 py-2 rounded-xl font-bold hover:bg-green-200 transition">
                                 Excel
                             </a>
