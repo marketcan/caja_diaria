@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Buscador de Horarios de Entrega por Código Postal</title>
+    <style>
+        /* Estilos CSS (Puedes simplificarlos si ya usas Bootstrap en PrestaShop) */
+        body {
+            font-family: sans-serif;
+            background-color: #f4f4f9;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            margin: 0;
+        }
+        .container {
+            background-color: #fff;
+            padding: 30px;
+            border-radius: 8px;
+            box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
+            width: 100%;
+            max-width: 400px;
+            text-align: center;
+        }
+        h1 {
+            color: #333;
+            margin-bottom: 20px;
+            font-size: 1.5em;
+        }
+        /* Estilos adaptados para parecerse a Bootstrap/PrestaShop */
+        .input-group {
+            display: flex;
+            margin-bottom: 15px;
+        }
+        .form-control {
+            flex-grow: 1;
+            padding: 10px;
+            border: 1px solid #ccc;
+            border-radius: 4px 0 0 4px; /* Esquinas redondeadas solo a la izquierda */
+            box-sizing: border-box;
+            font-size: 1em;
+        }
+        .btn-primary {
+            padding: 10px;
+            background-color: #007bff;
+            color: white;
+            border: none;
+            border-radius: 0 4px 4px 0; /* Esquinas redondeadas solo a la derecha */
+            cursor: pointer;
+            font-size: 1em;
+            transition: background-color 0.3s;
+        }
+        .btn-primary:hover {
+            background-color: #0056b3;
+        }
+        /* Clases de alerta de Bootstrap */
+        .alert {
+            margin-top: 20px;
+            padding: 15px;
+            border-radius: 4px;
+            text-align: left;
+            min-height: 50px;
+        }
+        .alert-success {
+            background-color: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+        .alert-danger {
+            background-color: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+        }
+        .alert-info {
+            background-color: #d1ecf1;
+            color: #0c5460;
+            border: 1px solid #bee5eb;
+        }
+        .alert-warning {
+             background-color: #ffeeba;
+             color: #856404;
+             border: 1px solid #ffc73b;
+        }
+    </style>
+</head>
+<body>
+
+    <div class="container">
+        <h1>🚚 Consulta de Días y Horarios de Entrega</h1>
+        <form id="buscador-form">
+            <div class="input-group">
+                <input type="text" id="cp-input" class="form-control" placeholder="Ingresa tu Código Postal" required>
+                <button type="submit" class="btn-primary">Buscar</button>
+            </div>
+        </form>
+        <div id="resultado" class="alert alert-info">
+            Introduce tu CP para ver los días y horarios de entrega.
+        </div>
+    </div>
+
+    <script>
+        // === CONFIGURACIÓN CLAVE ===
+        // URL de tu Google Sheet publicada como CSV (ya incluida)
+        const CSV_URL = 'https://docs.google.com/spreadsheets/d/e/2PACX-1vSCh-KyesB5Q0cEz1wFUrI_S7sY439WCNdEeSmLWzCsrrrrNjxHua3wa2Do4QiqONaBZM48tzJiBgpO/pub?output=csv'; 
+        // ===========================
+        
+        // Elementos del DOM
+        const form = document.getElementById('buscador-form');
+        const inputCP = document.getElementById('cp-input');
+        const resultadoDiv = document.getElementById('resultado');
+
+        /**
+         * Función para convertir el texto CSV en un Array de objetos.
+         */
+        function convertirCSV(csvText) {
+            const lineas = csvText.split('\n').filter(linea => linea.trim() !== '');
+            if (lineas.length === 0) return [];
+
+            // Obtiene los encabezados (asumiendo que están en la primera línea)
+            const encabezados = lineas[0].split(',').map(h => h.trim().toLowerCase().replace(/ /g, '_'));
+            
+            const datos = [];
+            // Itera sobre los datos
+            for (let i = 1; i < lineas.length; i++) {
+                // Utiliza una RegEx para manejar campos con comas si están entre comillas
+                const valores = lineas[i].match(/(".*?"|[^",]+)(?=\s*,|\s*$)/g) || lineas[i].split(',');
+                const objeto = {};
+                for (let j = 0; j < encabezados.length; j++) {
+                    const valorLimpio = valores[j] ? valores[j].trim().replace(/^"|"$/g, '') : '';
+                    objeto[encabezados[j]] = valorLimpio;
+                }
+                datos.push(objeto);
+            }
+            return datos;
+        }
+
+        /**
+         * Función principal para buscar el CP y mostrar el resultado.
+         */
+        async function buscarHorarios(event) {
+            event.preventDefault(); 
+            
+            const cp_ingresado = inputCP.value.trim().toUpperCase();
+            resultadoDiv.innerHTML = 'Cargando...';
+            resultadoDiv.className = 'alert alert-info'; 
+
+            if (!cp_ingresado) {
+                resultadoDiv.innerHTML = 'Por favor, ingresa un Código Postal.';
+                resultadoDiv.className = 'alert alert-danger';
+                return;
+            }
+
+            try {
+                // 1. Descargar el archivo CSV
+                const respuesta = await fetch(CSV_URL);
+                if (!respuesta.ok) {
+                     throw new Error(`Error al cargar datos: ${respuesta.statusText}`);
+                }
+                const texto_csv = await respuesta.text();
+
+                // 2. Procesar el CSV
+                const datos_zonas = convertirCSV(texto_csv); 
+
+                // 3. Buscar la Coincidencia (usando la columna 'codigo_postal')
+                const zona_encontrada = datos_zonas.find(zona => 
+                    zona.codigo_postal && zona.codigo_postal.toUpperCase() === cp_ingresado
+                );
+
+                // 4. Mostrar Resultado
+                if (zona_encontrada) {
+                    resultadoDiv.innerHTML = `
+                        <strong>¡Zona cubierta!</strong><br>
+                        <strong>Días de Entrega:</strong> ${zona_encontrada.dias_entrega}<br>
+                        <strong>Horario de Entrega:</strong> ${zona_encontrada.horario_entrega}
+                    `;
+                    resultadoDiv.className = 'alert alert-success'; 
+                } else {
+                    resultadoDiv.innerHTML = `
+                        Lo sentimos, el Código Postal **${cp_ingresado}** no está en nuestra zona de cobertura.
+                    `;
+                    resultadoDiv.className = 'alert alert-warning'; 
+                }
+
+            } catch (error) {
+                console.error("Error en la búsqueda:", error);
+                resultadoDiv.innerHTML = 'Ocurrió un error al consultar los datos. Inténtalo más tarde.';
+                resultadoDiv.className = 'alert alert-danger';
+            }
+        }
+
+        // Asignar la función al evento submit del formulario
+        if(form) {
+            form.addEventListener('submit', buscarHorarios);
+        }
+    </script>
+
+</body>
+</html>

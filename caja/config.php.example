@@ -9,5 +9,7 @@ define('DB_NAME', 'tu_base_de_datos');
 define('DB_USER', 'tu_usuario');
 define('DB_PASS', 'tu_contraseña');
 
+define('DB_TABLE_MOVIMIENTOS', 'caja_movimientos');
+
 define('APP_USER', 'admin'); 
 define('APP_PASS', 'cambiame123');

@@ -1,40 +1,39 @@
 <?php
-/**
- * SISTEMA DE CONTROL DE CAJA DIARIA
- * Optimizado para Hosting compartido (Webempresa)
- */
-
-// 1. CONFIGURACIÓN (Cargada desde config.php)
-if (file_exists('config.php')) {
-    require_once 'config.php';
-} else {
-    die("Error: No se encontró el archivo config.php. Por favor, crea uno basado en config.php.example");
-}
-date_default_timezone_set('America/Argentina/Buenos_Aires');
-
-
-
+// Seguridad de Cookies de Sesión
+ini_set('session.cookie_httponly', '1');
+ini_set('session.cookie_samesite', 'Lax');
 session_start();
 
-// 2. CONEXIÓN A BASE DE DATOS
-try {
-    $pdo = new PDO("mysql:host=" . DB_HOST . ";dbname=" . DB_NAME . ";charset=utf8", DB_USER, DB_PASS);
-    $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
-    $pdo->setAttribute(PDO::ATTR_DEFAULT_FETCH_MODE, PDO::FETCH_ASSOC);
-    // Sincronizar zona horaria con Argentina (-03:00)
-    $pdo->exec("SET time_zone = '-03:00'");
-} catch (PDOException $e) {
-    $db_error = "Error de conexión: " . $e->getMessage();
+// Inicializar Token CSRF
+if (empty($_SESSION['csrf_token'])) {
+    $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
 }
 
-// 3. LÓGICA DE AUTENTICACIÓN
-if (isset($_POST['action']) && $_POST['action'] == 'login') {
-    if ($_POST['username'] === APP_USER && $_POST['password'] === APP_PASS) {
-        $_SESSION['logged_in'] = true;
-        header("Location: index.php");
-        exit;
+// 1. CARGAR CONFIGURACIÓN DESDE LA CARPETA DE CAJA DIARIA
+$config_path = __DIR__ . '/caja/config.php';
+if (file_exists($config_path)) {
+    require_once $config_path;
+} else {
+    die("Error: No se encontró el archivo de configuración en caja/config.php.");
+}
+
+// 2. LÓGICA DE AUTENTICACIÓN
+if (isset($_POST['action']) && $_POST['action'] === 'login') {
+    // Validar CSRF
+    if (!isset($_POST['csrf_token']) || !hash_equals($_SESSION['csrf_token'], $_POST['csrf_token'])) {
+        $login_error = "Token de seguridad inválido. Recarga la página.";
     } else {
-        $login_error = "Usuario o contraseña incorrectos";
+        $username = $_POST['username'] ?? '';
+        $password = $_POST['password'] ?? '';
+        
+        if ($username === APP_USER && $password === APP_PASS) {
+            session_regenerate_id(true); // Prevenir fijación de sesión
+            $_SESSION['logged_in'] = true;
+            header("Location: index.php");
+            exit;
+        } else {
+            $login_error = "Usuario o contraseña incorrectos";
+        }
     }
 }
 
@@ -44,452 +43,340 @@ if (isset($_GET['logout'])) {
     exit;
 }
 
-// Bloqueo si no está logueado
 $is_logged_in = isset($_SESSION['logged_in']) && $_SESSION['logged_in'] === true;
-
-// 4. LÓGICA DE NEGOCIO (Solo si está logueado y no hay error de DB)
-if ($is_logged_in && !isset($db_error)) {
-    
-    // a. Agregar movimiento
-    if (isset($_POST['action']) && $_POST['action'] == 'add_movimiento') {
-        $tipo = $_POST['tipo'];
-        $concepto = htmlspecialchars($_POST['concepto']);
-        $monto = floatval($_POST['monto']);
-        $stmt = $pdo->prepare("INSERT INTO movimientos (tipo, concepto, monto) VALUES (?, ?, ?)");
-        $stmt->execute([$tipo, $concepto, $monto]);
-        header("Location: index.php?msg=added");
-        exit;
-    }
-
-    // b. Eliminar movimiento
-    if (isset($_GET['delete'])) {
-        $stmt = $pdo->prepare("DELETE FROM movimientos WHERE id = ?");
-        $stmt->execute([$_GET['delete']]);
-        header("Location: index.php?msg=deleted");
-        exit;
-    }
-
-    // c. Editar movimiento
-    if (isset($_POST['action']) && $_POST['action'] == 'edit_movimiento') {
-        $id = intval($_POST['id']);
-        $tipo = $_POST['tipo'];
-        $concepto = htmlspecialchars($_POST['concepto']);
-        $monto = floatval($_POST['monto']);
-        $fecha = $_POST['fecha']; // Formato datetime-local: YYYY-MM-DDTHH:MM
-        
-        $stmt = $pdo->prepare("UPDATE movimientos SET tipo = ?, concepto = ?, monto = ?, fecha = ? WHERE id = ?");
-        $stmt->execute([$tipo, $concepto, $monto, str_replace('T', ' ', $fecha), $id]);
-        header("Location: index.php?msg=updated");
-        exit;
-    }
-
-    // b. Exportar a Excel (CSV)
-    if (isset($_GET['export'])) {
-        $filter_date = $_GET['filter_date'] ?? null;
-        $search_text = $_GET['search_text'] ?? null;
-        
-        $where_clauses = [];
-        $params = [];
-        
-        if ($filter_date) {
-            $where_clauses[] = "DATE(fecha) = :fdate";
-            $params[':fdate'] = $filter_date;
-        }
-        if (!empty($search_text)) {
-            $where_clauses[] = "concepto LIKE :stext";
-            $params[':stext'] = '%' . $search_text . '%';
-        }
-        
-        $where_sql = count($where_clauses) > 0 ? "WHERE " . implode(" AND ", $where_clauses) : "";
-
-        // Calcular saldo inicial para el filtro
-        $saldo_acumulado = 0;
-        if ($filter_date) {
-            $stmt_prev = $pdo->prepare("SELECT SUM(CASE WHEN tipo = 'ingreso' THEN monto ELSE -monto END) as previo FROM movimientos WHERE DATE(fecha) < :fdate");
-            $stmt_prev->execute([':fdate' => $filter_date]);
-            $res_prev = $stmt_prev->fetch();
-            $saldo_acumulado = floatval($res_prev['previo'] ?? 0);
-        }
-
-        header('Content-Type: text/csv; charset=utf-8');
-        header('Content-Disposition: attachment; filename=caja_' . ($filter_date ?: date('Y-m-d')) . '.csv');
-        $output = fopen('php://output', 'w');
-        
-        // UTF-8 BOM para Excel
-        fprintf($output, chr(0xEF).chr(0xBB).chr(0xBF));
-        
-        fputcsv($output, ['Fecha', 'Concepto', 'Tipo', 'Monto', 'Saldo Acumulado']);
-        
-        // Exportamos en orden cronológico para que el saldo tenga sentido
-        $stmt = $pdo->prepare("SELECT * FROM movimientos $where_sql ORDER BY fecha ASC");
-        $stmt->execute($params);
-        
-        while ($row = $stmt->fetch()) {
-            $monto_num = floatval($row['monto']);
-            if ($row['tipo'] === 'ingreso') {
-                $saldo_acumulado += $monto_num;
-                $monto_str = "+" . number_format($monto_num, 2, ',', '.');
-            } else {
-                $saldo_acumulado -= $monto_num;
-                $monto_str = "-" . number_format($monto_num, 2, ',', '.');
-            }
-            
-            fputcsv($output, [
-                $row['fecha'], 
-                $row['concepto'], 
-                ucfirst($row['tipo']), 
-                $monto_str, 
-                number_format($saldo_acumulado, 2, ',', '.')
-            ]);
-        }
-        fclose($output);
-        exit;
-    }
-
-
-    // e. Obtener historial y balance filtrado
-    $filter_date = $_GET['filter_date'] ?? null;
-    $search_text = $_GET['search_text'] ?? null;
-    
-    $where_clauses = [];
-    $params = [];
-    
-    if ($filter_date) {
-        $where_clauses[] = "DATE(fecha) = :fdate";
-        $params[':fdate'] = $filter_date;
-    }
-    if (!empty($search_text)) {
-        $where_clauses[] = "concepto LIKE :stext";
-        $params[':stext'] = '%' . $search_text . '%';
-    }
-    
-    $where_sql = count($where_clauses) > 0 ? "WHERE " . implode(" AND ", $where_clauses) : "";
-
-    // Dashboard con filtro
-    $stmt = $pdo->prepare("SELECT 
-        SUM(CASE WHEN tipo = 'ingreso' THEN monto ELSE -monto END) as saldo_total
-        FROM movimientos $where_sql");
-    $stmt->execute($params);
-    $stats = $stmt->fetch();
-    $saldo_total = $stats['saldo_total'] ?? 0;
-
-    // Historial con filtro
-    $stmt = $pdo->prepare("SELECT * FROM movimientos $where_sql ORDER BY fecha DESC LIMIT 100");
-    $stmt->execute($params);
-    $movimientos = $stmt->fetchAll();
-}
 ?>
 <!DOCTYPE html>
 <html lang="es">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Caja Diaria - Control Interno</title>
-    <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>💰</text></svg>">
-    <script src="https://cdn.tailwindcss.com"></script>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
+    <title>marketCan | Panel de Utilitarios</title>
+    <meta name="description" content="Portal central de utilitarios para marketCan: Logística y Caja Diaria. Acceso rápido a herramientas administrativas.">
+    
+    <!-- Favicon -->
+    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🐾</text></svg>">
+    
+    <!-- Font Awesome -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    
+    <!-- CSS -->
+    <link rel="stylesheet" href="style.css?v=1.1">
+
+    <?php if ($is_logged_in): ?>
     <style>
-        body { font-family: 'Inter', sans-serif; }
+        /* Sidebar: menú scrollable con logout siempre visible */
+        #sidebar-nav {
+            display: flex !important;
+            flex-direction: column !important;
+            overflow: hidden !important;
+            height: 100vh !important;
+        }
+        #sidebar-nav .logo-container {
+            flex-shrink: 0;
+        }
+        #sidebar-nav .sidebar-nav-inner {
+            flex: 1 !important;
+            display: flex !important;
+            flex-direction: column !important;
+            overflow: hidden !important;
+            min-height: 0 !important;
+        }
+        #sidebar-nav .nav-menu-main {
+            flex: 1 !important;
+            overflow-y: auto !important;
+            min-height: 0 !important;
+            padding: 1rem 1.25rem !important;
+        }
+        #sidebar-nav .nav-menu-logout {
+            flex-shrink: 0 !important;
+            padding: 0.75rem 1.25rem !important;
+            border-top: 1px solid #e5e7eb !important;
+        }
     </style>
+    <?php endif; ?>
+    <?php if (!$is_logged_in): ?>
+    <style>
+        /* Estilos Premium para la pantalla de Login */
+        body {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            background: radial-gradient(circle at top right, #e0f2fe 0%, #f1f5f9 100%);
+            margin: 0;
+            padding: 20px;
+        }
+        .login-card {
+            background: rgba(255, 255, 255, 0.9);
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.5);
+            border-radius: 24px;
+            padding: 2.5rem;
+            width: 100%;
+            max-width: 420px;
+            box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.05), 0 10px 10px -5px rgba(0, 0, 0, 0.02);
+            text-align: center;
+            transition: all 0.3s ease;
+        }
+        .login-logo {
+            margin-bottom: 2rem;
+            display: inline-block;
+            background: var(--primary-blue, #0071BC);
+            padding: 1.5rem;
+            border-radius: 20px;
+            color: white;
+            font-size: 2.5rem;
+            box-shadow: 0 10px 15px -3px rgba(0, 113, 188, 0.3);
+        }
+        .login-header h1 {
+            font-family: 'Outfit', sans-serif;
+            font-size: 1.75rem;
+            font-weight: 700;
+            color: #1e293b;
+            margin-bottom: 0.5rem;
+        }
+        .login-header p {
+            color: #64748b;
+            font-size: 0.95rem;
+            margin-bottom: 2rem;
+        }
+        .form-group {
+            text-align: left;
+            margin-bottom: 1.25rem;
+        }
+        .form-group label {
+            display: block;
+            font-size: 0.85rem;
+            font-weight: 600;
+            color: #475569;
+            margin-bottom: 0.5rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+        .input-wrapper {
+            position: relative;
+        }
+        .input-wrapper i {
+            position: absolute;
+            left: 1rem;
+            top: 50%;
+            transform: translateY(-50%);
+            color: #94a3b8;
+        }
+        .form-control {
+            width: 100%;
+            padding: 0.875rem 1rem 0.875rem 2.75rem;
+            border: 1px solid #cbd5e1;
+            border-radius: 12px;
+            font-size: 1rem;
+            color: #1e293b;
+            background-color: white;
+            outline: none;
+            transition: all 0.2s ease;
+        }
+        .form-control:focus {
+            border-color: var(--primary-blue, #0071BC);
+            box-shadow: 0 0 0 3px rgba(0, 113, 188, 0.15);
+        }
+        .btn-submit {
+            width: 100%;
+            padding: 0.875rem;
+            background-color: var(--primary-blue, #0071BC);
+            color: white;
+            border: none;
+            border-radius: 12px;
+            font-size: 1rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            box-shadow: 0 4px 6px -1px rgba(0, 113, 188, 0.2);
+            margin-top: 1rem;
+        }
+        .btn-submit:hover {
+            background-color: var(--secondary-blue, #005a96);
+            transform: translateY(-1px);
+            box-shadow: 0 6px 12px -2px rgba(0, 113, 188, 0.3);
+        }
+        .alert-error {
+            background-color: #fef2f2;
+            border: 1px solid #fee2e2;
+            color: #b91c1c;
+            padding: 0.75rem 1rem;
+            border-radius: 12px;
+            font-size: 0.9rem;
+            margin-bottom: 1.5rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            text-align: left;
+        }
+    </style>
+    <?php endif; ?>
 </head>
-<body class="bg-gray-50 text-gray-900 min-h-screen">
+<body>
 
     <?php if (!$is_logged_in): ?>
-        <!-- LOGIN UI -->
-        <div class="flex items-center justify-center min-h-screen px-4">
-            <div class="max-w-md w-full bg-white rounded-2xl shadow-xl p-8">
-                <div class="text-center mb-8">
-                    <h1 class="text-3xl font-bold text-gray-800">Caja Diaria</h1>
-                    <p class="text-gray-500">Inicia sesión para continuar</p>
-                </div>
-                
-                <?php if (isset($login_error)): ?>
-                    <div class="bg-red-100 border-l-4 border-red-500 text-red-700 p-4 mb-6 rounded">
-                        <?php echo $login_error; ?>
-                    </div>
-                <?php endif; ?>
-
-                <form method="POST" class="space-y-6">
-                    <input type="hidden" name="action" value="login">
-                    <div>
-                        <label class="block text-sm font-semibold mb-2">Usuario</label>
-                        <input type="text" name="username" required class="w-full px-4 py-3 rounded-lg border border-gray-300 focus:ring-2 focus:ring-blue-500 outline-none transition">
-                    </div>
-                    <div>
-                        <label class="block text-sm font-semibold mb-2">Contraseña</label>
-                        <input type="password" name="password" required class="w-full px-4 py-3 rounded-lg border border-gray-300 focus:ring-2 focus:ring-blue-500 outline-none transition">
-                    </div>
-                    <button type="submit" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 rounded-lg transition shadow-lg">
-                        Entrar al Sistema
-                    </button>
-                </form>
+        <!-- PANTALLA DE LOGIN -->
+        <div class="login-card">
+            <div class="login-logo">
+                <i class="fas fa-paw"></i>
             </div>
-        </div>
-    <?php else: ?>
-        <!-- MAIN APP -->
-        <nav class="bg-white shadow-sm border-b px-4 py-4 mb-8">
-            <div class="max-w-4xl mx-auto flex justify-between items-center">
-                <h1 class="text-xl font-bold text-blue-600">Caja Diaria</h1>
-                <div class="flex items-center gap-4">
-                    <a href="?logout=1" class="text-sm font-medium text-red-500 hover:text-red-700">Cerrar Sesión</a>
-                </div>
+            <div class="login-header">
+                <h1>Panel de Utilitarios</h1>
+                <p>Ingresa tus credenciales administrativas</p>
             </div>
-        </nav>
 
-        <main class="max-w-4xl mx-auto px-4 pb-12">
-            
-            <?php if (isset($db_error)): ?>
-                <div class="bg-red-500 text-white p-6 rounded-2xl shadow-lg mb-8">
-                    <h2 class="font-bold text-lg mb-2">Error de Configuración</h2>
-                    <p><?php echo $db_error; ?></p>
-                    <p class="text-sm mt-4 opacity-75 italic text-white/80">Revisa los datos de conexión al principio de index.php</p>
+            <?php if (isset($login_error)): ?>
+                <div class="alert-error">
+                    <i class="fas fa-exclamation-circle"></i>
+                    <span><?php echo htmlspecialchars($login_error); ?></span>
                 </div>
-            <?php else: ?>
-
-                <!-- DASHBOARD -->
-                <div class="flex flex-col md:flex-row gap-4 mb-8">
-                    <div class="flex-1 bg-white rounded-3xl shadow-sm border p-6 flex flex-col items-center justify-center text-center">
-                        <span class="text-gray-500 uppercase tracking-wider text-xs font-bold mb-2">Saldo Total Actual</span>
-                        <div class="text-5xl font-extrabold <?php echo $saldo_total >= 0 ? 'text-green-600' : 'text-red-600'; ?>">
-                            $<?php echo number_format($saldo_total, 2, ',', '.'); ?>
-                        </div>
-                    </div>
-                    <div class="flex items-center justify-center">
-                        <button onclick="window.location.href='index.php'" class="w-full md:w-auto bg-blue-50 hover:bg-blue-100 text-blue-600 p-8 rounded-3xl transition-all duration-300 shadow-sm hover:shadow-md flex flex-col items-center gap-2 group border border-blue-100/50">
-                            <div class="bg-white p-3 rounded-2xl shadow-sm group-hover:scale-110 transition-transform duration-300">
-                                <svg xmlns="http://www.w3.org/2000/svg" class="h-8 w-8 group-active:rotate-[360deg] transition-transform duration-700" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-                                </svg>
-                            </div>
-                            <span class="text-xs font-bold uppercase tracking-widest mt-1">Actualizar Datos</span>
-                        </button>
-                    </div>
-                </div>
-
-                <!-- FORMULARIO -->
-                <div class="bg-white rounded-3xl shadow-sm border p-6 mb-8">
-                    <h2 class="text-lg font-bold mb-4">Registrar Movimiento</h2>
-                    <form method="POST" class="grid grid-cols-1 md:grid-cols-4 gap-4">
-                        <input type="hidden" name="action" value="add_movimiento">
-                        <div>
-                            <select name="tipo" class="w-full px-4 py-2 rounded-xl border border-gray-200 outline-none focus:ring-2 focus:ring-blue-500 bg-gray-50">
-                                <option value="ingreso">Ingreso (+)</option>
-                                <option value="egreso">Egreso (-)</option>
-                            </select>
-                        </div>
-                        <div class="md:col-span-1">
-                            <input type="text" name="concepto" placeholder="Concepto" required class="w-full px-4 py-2 rounded-xl border border-gray-200 outline-none focus:ring-2 focus:ring-blue-500">
-                        </div>
-                        <div>
-                            <input type="number" step="0.01" name="monto" placeholder="Monto" required class="w-full px-4 py-2 rounded-xl border border-gray-200 outline-none focus:ring-2 focus:ring-blue-500">
-                        </div>
-                        <div>
-                            <button type="submit" class="w-full bg-blue-600 text-white px-6 py-2 rounded-xl font-bold hover:bg-blue-700 transition">
-                                Guardar
-                            </button>
-                        </div>
-                    </form>
-                </div>
-
-                <!-- TABLA HISTORIAL -->
-                <div class="bg-white rounded-3xl shadow-sm border overflow-hidden">
-                    <div class="p-6 border-b flex flex-col md:flex-row justify-between items-center gap-4">
-                        <h2 class="text-lg font-bold text-gray-800">Operaciones</h2>
-                        
-                        <!-- FILTROS -->
-                        <form method="GET" class="flex flex-wrap justify-center md:justify-end items-center gap-2 w-full md:w-auto">
-                            <input type="text" name="search_text" placeholder="Buscar..." value="<?php echo htmlspecialchars($search_text ?? ''); ?>" 
-                                   class="px-4 py-2 rounded-xl border border-gray-200 outline-none focus:ring-2 focus:ring-blue-500 text-sm bg-gray-50 w-full md:w-32 lg:w-48">
-                            <input type="date" name="filter_date" value="<?php echo $filter_date; ?>" 
-                                   class="px-4 py-2 rounded-xl border border-gray-200 outline-none focus:ring-2 focus:ring-blue-500 text-sm bg-gray-50 flex-grow md:flex-grow-0">
-                            <button type="submit" class="bg-blue-600 text-white px-4 py-2 rounded-xl text-sm font-bold hover:bg-blue-700 transition">
-                                Filtrar
-                            </button>
-                            <?php if ($filter_date || !empty($search_text)): ?>
-                                <a href="index.php" class="text-xs text-red-500 font-bold hover:underline px-2">Limpiar</a>
-                            <?php endif; ?>
-                            <a href="?export=1<?php echo $filter_date ? '&filter_date=' . urlencode($filter_date) : ''; ?><?php echo !empty($search_text) ? '&search_text=' . urlencode($search_text) : ''; ?>" 
-                               class="text-sm bg-green-100 text-green-700 px-4 py-2 rounded-xl font-bold hover:bg-green-200 transition">
-                                Excel
-                            </a>
-                        </form>
-                    </div>
-                    <div class="overflow-x-auto">
-                        <table class="w-full">
-                            <thead>
-                                <tr class="bg-gray-50 text-left">
-                                    <th class="px-6 py-4 text-xs font-bold text-gray-500 uppercase">Fecha</th>
-                                    <th class="px-6 py-4 text-xs font-bold text-gray-500 uppercase">Concepto</th>
-                                    <th class="px-6 py-4 text-xs font-bold text-gray-500 uppercase text-right">Monto</th>
-                                    <th class="px-6 py-4 text-xs font-bold text-gray-500 uppercase text-center">Acciones</th>
-                                </tr>
-                            </thead>
-                            <tbody class="divide-y divide-gray-100">
-                                <?php if (empty($movimientos)): ?>
-                                    <tr>
-                                        <td colspan="3" class="px-6 py-12 text-center text-gray-400">No hay movimientos registrados</td>
-                                    </tr>
-                                <?php else: ?>
-                                    <?php foreach ($movimientos as $mov): ?>
-                                        <tr class="hover:bg-gray-50 transition">
-                                            <td class="px-6 py-4 text-sm text-gray-500">
-                                                <?php echo date('d/m H:i', strtotime($mov['fecha'])); ?>
-                                            </td>
-                                            <td class="px-6 py-4 text-sm font-medium">
-                                                <?php echo $mov['concepto']; ?>
-                                            </td>
-                                            <td class="px-6 py-4 text-sm text-right font-bold <?php echo $mov['tipo'] == 'ingreso' ? 'text-green-600' : 'text-red-600'; ?>">
-                                                <?php echo ($mov['tipo'] == 'ingreso' ? '+' : '-') . ' $' . number_format($mov['monto'], 2, ',', '.'); ?>
-                                            </td>
-                                            <td class="px-6 py-4 text-sm text-center">
-                                                <div class="flex justify-center gap-2">
-                                                    <button onclick='openEditModal(<?php echo json_encode($mov); ?>)' class="text-blue-500 hover:text-blue-700 p-1">
-                                                        <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
-                                                            <path d="M13.586 3.586a2 2 0 112.828 2.828l-.793.793-2.828-2.828.793-.793zM11.379 5.793L3 14.172V17h2.828l8.38-8.379-2.83-2.828z" />
-                                                        </svg>
-                                                    </button>
-                                                    <button onclick="showConfirm('Eliminar Movimiento', '¿Estás seguro de que deseas borrar este registro de caja? Esta acción no se puede deshacer.', () => window.location.href='?delete=<?php echo $mov['id']; ?>')" class="text-red-500 hover:text-red-700 p-1">
-                                                        <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
-                                                            <path fill-rule="evenodd" d="M9 2a1 1 0 00-.894.553L7.382 4H4a1 1 0 000 2v10a2 2 0 002 2h8a2 2 0 002-2V6a1 1 0 100-2h-3.382l-.724-1.447A1 1 0 0011 2H9zM7 8a1 1 0 012 0v6a1 1 0 11-2 0V8zm5-1a1 1 0 00-1 1v6a1 1 0 102 0V8a1 1 0 00-1-1z" clip-rule="evenodd" />
-                                                        </svg>
-                                                    </button>
-                                                </div>
-                                            </td>
-                                        </tr>
-                                    <?php endforeach; ?>
-                                <?php endif; ?>
-                            </tbody>
-                        </table>
-                    </div>
-                </div>
-
             <?php endif; ?>
-        </main>
-    <?php endif; ?>
 
-    <!-- MODAL DE EDICIÓN -->
-    <div id="editModal" class="fixed inset-0 bg-black bg-opacity-50 hidden items-center justify-center p-4 z-50">
-        <div class="bg-white rounded-3xl p-8 max-w-md w-full shadow-2xl scale-up-animation">
-            <h2 class="text-2xl font-bold mb-6">Editar Movimiento</h2>
-            <form method="POST" class="space-y-4">
-                <input type="hidden" name="action" value="edit_movimiento">
-                <input type="hidden" name="id" id="edit_id">
-                <div>
-                    <label class="block text-sm font-semibold mb-2">Fecha y Hora</label>
-                    <input type="datetime-local" name="fecha" id="edit_fecha" required class="w-full px-4 py-2 rounded-xl border border-gray-200 outline-none focus:ring-2 focus:ring-blue-500 bg-gray-50">
+            <form method="POST">
+                <input type="hidden" name="action" value="login">
+                <input type="hidden" name="csrf_token" value="<?php echo htmlspecialchars($_SESSION['csrf_token'] ?? '', ENT_QUOTES, 'UTF-8'); ?>">
+                <div class="form-group">
+                    <label for="username">Usuario</label>
+                    <div class="input-wrapper">
+                        <i class="fas fa-user"></i>
+                        <input type="text" id="username" name="username" class="form-control" placeholder="admin" required autocomplete="username">
+                    </div>
                 </div>
-                <div>
-                    <label class="block text-sm font-semibold mb-2">Tipo</label>
-                    <select name="tipo" id="edit_tipo" class="w-full px-4 py-2 rounded-xl border border-gray-200 outline-none focus:ring-2 focus:ring-blue-500 bg-gray-50">
-                        <option value="ingreso">Ingreso (+)</option>
-                        <option value="egreso">Egreso (-)</option>
-                    </select>
+                <div class="form-group">
+                    <label for="password">Contraseña</label>
+                    <div class="input-wrapper">
+                        <i class="fas fa-lock"></i>
+                        <input type="password" id="password" name="password" class="form-control" placeholder="••••••••" required autocomplete="current-password">
+                    </div>
                 </div>
-                <div>
-                    <label class="block text-sm font-semibold mb-2">Concepto</label>
-                    <input type="text" name="concepto" id="edit_concepto" required class="w-full px-4 py-2 rounded-xl border border-gray-200 outline-none focus:ring-2 focus:ring-blue-500">
-                </div>
-                <div>
-                    <label class="block text-sm font-semibold mb-2">Monto</label>
-                    <input type="number" step="0.01" name="monto" id="edit_monto" required class="w-full px-4 py-2 rounded-xl border border-gray-200 outline-none focus:ring-2 focus:ring-blue-500">
-                </div>
-                <div class="flex gap-3 pt-4">
-                    <button type="button" onclick="closeEditModal()" class="flex-1 bg-gray-100 text-gray-700 px-6 py-3 rounded-xl font-bold hover:bg-gray-200 transition">
-                        Cancelar
-                    </button>
-                    <button type="submit" class="flex-1 bg-blue-600 text-white px-6 py-3 rounded-xl font-bold hover:bg-blue-700 transition">
-                        Actualizar
-                    </button>
-                </div>
+                <button type="submit" class="btn-submit">Iniciar Sesión</button>
             </form>
         </div>
-    </div>
-
-    <!-- MODAL DE CONFIRMACIÓN -->
-    <div id="confirmModal" class="fixed inset-0 bg-black/60 backdrop-blur-sm hidden items-center justify-center p-4 z-[60]">
-        <div class="bg-white rounded-[2rem] p-8 max-w-sm w-full shadow-2xl scale-up-animation border border-gray-100">
-            <div class="w-16 h-16 bg-blue-50 rounded-2xl flex items-center justify-center mb-6 mx-auto">
-                <svg xmlns="http://www.w3.org/2000/svg" class="h-8 w-8 text-blue-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
-                </svg>
+    <?php else: ?>
+        <!-- PANEL DE ACCESO AUTENTICADO -->
+        <!-- Menú Lateral -->
+        <aside id="sidebar-nav">
+            <div class="logo-container">
+                <img src="images/logo.jpg" alt="marketCan" class="logo-img">
             </div>
-            <h2 id="confirm_title" class="text-xl font-bold mb-2 text-center text-gray-800">Confirmar Acción</h2>
-            <p id="confirm_message" class="text-gray-500 text-center mb-8 text-sm leading-relaxed"></p>
-            <div class="flex flex-col gap-2">
-                <button onclick="executeConfirm()" class="w-full bg-blue-600 text-white px-6 py-3 rounded-2xl font-bold hover:bg-blue-700 transition order-2 md:order-1">
-                    Confirmar
-                </button>
-                <button onclick="closeConfirm()" class="w-full bg-gray-50 text-gray-500 px-6 py-3 rounded-2xl font-bold hover:bg-gray-100 transition order-1 md:order-2">
-                    Cancelar
-                </button>
+
+            <nav class="sidebar-nav-inner">
+                <ul class="nav-menu nav-menu-main">
+                    <li class="nav-item">
+                        <a href="javascript:void(0)" class="nav-link active" id="btn-inicio" onclick="showView('home')">
+                            <i class="fas fa-home"></i>
+                            <span>Inicio</span>
+                        </a>
+                    </li>
+                    <li class="nav-item">
+                        <a href="javascript:void(0)" class="nav-link" id="btn-logistica" onclick="showView('logistica/index.html')">
+                            <i class="fas fa-shipping-fast"></i>
+                            <span>Logística</span>
+                        </a>
+                    </li>
+                    <li class="nav-item">
+                        <a href="javascript:void(0)" class="nav-link" id="btn-caja" onclick="showView('caja/index.php')">
+                            <i class="fas fa-cash-register"></i>
+                            <span>Caja Diaria</span>
+                        </a>
+                    </li>
+                    <li class="nav-item">
+                        <a href="https://drive.google.com/drive/folders/10XOKzdgHBIe1GMVEEBWk19gu1OgO9C7Y" class="nav-link" id="btn-drive" target="_blank">
+                            <i class="fab fa-google-drive"></i>
+                            <span>Google Drive</span>
+                        </a>
+                    </li>
+                    <li class="nav-item">
+                        <a href="https://drive.google.com/drive/folders/1YGdvvmzlv4b7nR-pbfYh31b4zbq3YMD2" class="nav-link" id="btn-precios-m" target="_blank">
+                            <i class="fas fa-list-alt"></i>
+                            <span>Precios Mayorista</span>
+                        </a>
+                    </li>
+                    <li class="nav-item">
+                        <a href="https://drive.google.com/drive/folders/1sQC7K2Fv86YNlfInp-7jfz2SdAGC0k_o" class="nav-link" id="btn-precios-p" target="_blank">
+                            <i class="fas fa-file-invoice-dollar"></i>
+                            <span>Precios Proveedores</span>
+                        </a>
+                    </li>
+                    <li class="nav-item">
+                        <a href="https://drive.google.com/drive/folders/1c69iIpahP4JY8rIds9sdVk7_LXEC8Nwj" class="nav-link" id="btn-royal" target="_blank">
+                            <i class="fas fa-dog"></i>
+                            <span>Pedidos Royal Canin</span>
+                        </a>
+                    </li>
+                    <li class="nav-item">
+                        <a href="https://animalshop.ennube.ar/lista/mayor/" class="nav-link" id="btn-animalshop" target="_blank">
+                            <i class="fas fa-store"></i>
+                            <span>Animalshop</span>
+                        </a>
+                    </li>
+                </ul>
+
+                <ul class="nav-menu nav-menu-logout">
+                    <li class="nav-item" style="margin-bottom: 0; margin-top: 0.75rem;">
+                        <a href="?logout=1" class="nav-link" style="color: #ef4444;" id="btn-logout">
+                            <i class="fas fa-sign-out-alt"></i>
+                            <span>Cerrar Sesión</span>
+                        </a>
+                    </li>
+                </ul>
+            </nav>
+        </aside>
+
+        <!-- Contenido Principal -->
+        <main id="main-content">
+            <!-- Vista Home -->
+            <div id="view-home" class="view-container">
+                <header>
+                    <h1>Bienvenido</h1>
+                    <p class="subtitle">Panel central de herramientas para el equipo de marketCan.</p>
+                </header>
+
+                <!-- Hero Section -->
+                <section class="hero-card">
+                    <img src="images/hero.jpg" alt="marketCan Hero" class="hero-image">
+                    <div class="hero-overlay-minimal"></div>
+                </section>
             </div>
-        </div>
-    </div>
 
-    <script>
-        function openEditModal(mov) {
-            document.getElementById('edit_id').value = mov.id;
-            document.getElementById('edit_tipo').value = mov.tipo;
-            document.getElementById('edit_concepto').value = mov.concepto;
-            document.getElementById('edit_monto').value = mov.monto;
-            
-            // Formatear fecha de DB (YYYY-MM-DD HH:MM:SS) a datetime-local (YYYY-MM-DDTHH:MM)
-            const date = new Date(mov.fecha.replace(' ', 'T'));
-            const formattedDate = date.getFullYear() + '-' + 
-                String(date.getMonth() + 1).padStart(2, '0') + '-' + 
-                String(date.getDate()).padStart(2, '0') + 'T' + 
-                String(date.getHours()).padStart(2, '0') + ':' + 
-                String(date.getMinutes()).padStart(2, '0');
-            
-            document.getElementById('edit_fecha').value = formattedDate;
-            
-            document.getElementById('editModal').classList.remove('hidden');
-            document.getElementById('editModal').classList.add('flex');
-        }
+            <!-- Vista App (Iframe) -->
+            <div id="view-app" class="view-container" style="display: none;">
+                <iframe id="main-frame" src="" frameborder="0"></iframe>
+            </div>
+        </main>
 
-        function closeEditModal() {
-            document.getElementById('editModal').classList.add('hidden');
-            document.getElementById('editModal').classList.remove('flex');
-        }
+        <script>
+            function showView(target) {
+                const homeView = document.getElementById('view-home');
+                const appView = document.getElementById('view-app');
+                const mainFrame = document.getElementById('main-frame');
+                const navLinks = document.querySelectorAll('.nav-menu .nav-link');
 
+                // Reset active links
+                navLinks.forEach(link => link.classList.remove('active'));
 
-        // SISTEMA DE CONFIRMACIÓN PERSONALIZADO
-        let confirmCallback = null;
-        function showConfirm(title, message, onConfirm) {
-            document.getElementById('confirm_title').innerText = title;
-            document.getElementById('confirm_message').innerText = message;
-            confirmCallback = onConfirm;
-            document.getElementById('confirmModal').classList.remove('hidden');
-            document.getElementById('confirmModal').classList.add('flex');
-        }
+                if (target === 'home') {
+                    homeView.style.display = 'block';
+                    appView.style.display = 'none';
+                    mainFrame.src = '';
+                    document.getElementById('btn-inicio').classList.add('active');
+                } else {
+                    homeView.style.display = 'none';
+                    appView.style.display = 'block';
+                    mainFrame.src = target;
+                    
+                    // Find and highlight the clicked link based on its onclick attribute
+                    navLinks.forEach(link => {
+                        const clickAttr = link.getAttribute('onclick');
+                        if (clickAttr && clickAttr.includes(target)) {
+                            link.classList.add('active');
+                        }
+                    });
+                }
+            }
+        </script>
+    <?php endif; ?>
 
-        function closeConfirm() {
-            document.getElementById('confirmModal').classList.add('hidden');
-            document.getElementById('confirmModal').classList.remove('flex');
-        }
-
-        function executeConfirm() {
-            if (confirmCallback) confirmCallback();
-            closeConfirm();
-        }
-
-        // Cerrar modales al hacer clic fuera
-        window.onclick = function(event) {
-            const editModal = document.getElementById('editModal');
-            const confirmModal = document.getElementById('confirmModal');
-            if (event.target == editModal) closeEditModal();
-            if (event.target == confirmModal) closeConfirm();
-        }
-    </script>
-
-    <style>
-        @keyframes scaleUp {
-            from { transform: scale(0.95); opacity: 0; }
-            to { transform: scale(1); opacity: 1; }
-        }
-        .scale-up-animation {
-            animation: scaleUp 0.15s ease-out;
-        }
-    </style>
 </body>
 </html>

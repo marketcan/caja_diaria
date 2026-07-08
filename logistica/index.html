@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Buscador de Horarios de Entrega</title>
+    <style>
+        /* Estilos CSS (similares a Bootstrap para PrestaShop) */
+        body { font-family: sans-serif; background-color: #f4f4f9; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; }
+        .container { background-color: #fff; padding: 30px; border-radius: 8px; box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1); width: 100%; max-width: 450px; text-align: center; }
+        h1 { color: #333; margin-bottom: 20px; font-size: 1.5em; }
+        .tab-content { border: 1px solid #ccc; padding: 20px; border-radius: 4px; }
+        .input-group, .select-group { display: flex; margin-bottom: 15px; }
+        .form-control, .form-select { flex-grow: 1; padding: 10px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box; font-size: 1em; margin-right: 5px;}
+        .btn-primary { padding: 10px; background-color: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 1em; transition: background-color 0.3s; }
+        .btn-primary:hover { background-color: #0056b3; }
+        .alert { margin-top: 20px; padding: 15px; border-radius: 4px; text-align: left; min-height: 50px; }
+        .alert-success { background-color: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
+        .alert-danger { background-color: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
+        .alert-info { background-color: #d1ecf1; color: #0c5460; border: 1px solid #bee5eb; }
+        .alert-warning { background-color: #ffeeba; color: #856404; border: 1px solid #ffc73b; }
+        .nav-tabs { display: flex; justify-content: space-around; margin-bottom: 10px; }
+        .nav-link { padding: 10px; cursor: pointer; border: 1px solid #ccc; border-bottom: none; border-radius: 4px 4px 0 0; background-color: #eee; }
+        .nav-link.active { background-color: #fff; border-bottom: 1px solid #fff; font-weight: bold; }
+        .d-none { display: none; }
+        
+        /* Estilos específicos para la lista de resultados */
+        .result-list { 
+            list-style: none; 
+            padding-left: 0; 
+            margin-top: 10px;
+        }
+        .result-list li {
+            margin-bottom: 10px;
+            padding: 5px;
+            border-bottom: 1px dashed #c3e6cb;
+        }
+        .result-list li:last-child {
+            border-bottom: none;
+        }
+    </style>
+</head>
+<body>
+
+    <div class="container">
+        <h1>🚚 Consulta de Días y Horarios de Entrega</h1>
+
+        <div class="nav-tabs">
+            <div class="nav-link active" data-tab="cp">Buscar por CP</div>
+            <div class="nav-link" data-tab="localidad">Buscar por Localidad</div>
+        </div>
+
+        <div class="tab-content">
+            <div id="cp-tab" class="tab-pane">
+                <form id="cp-form">
+                    <div class="input-group">
+                        <input type="text" id="cp-input" class="form-control" placeholder="Ingresa tu Código Postal" required>
+                        <button type="submit" class="btn-primary">Buscar</button>
+                    </div>
+                </form>
+            </div>
+
+            <div id="localidad-tab" class="tab-pane d-none">
+                <form id="localidad-form">
+                    <div class="select-group">
+                        <select id="localidad-select" class="form-select" required>
+                            <option value="">Cargando Localidades...</option>
+                        </select>
+                        <button type="submit" class="btn-primary">Buscar</button>
+                    </div>
+                </form>
+            </div>
+            
+            <div id="resultado" class="alert alert-info">
+                Introduce el CP o selecciona una localidad para ver los días y horarios.
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // === CONFIGURACIÓN CLAVE ===
+        // URL de tu Google Sheet publicada como CSV
+        const CSV_URL = 'https://docs.google.com/spreadsheets/d/e/2PACX-1vSCh-KyesB5Q0cEz1wFUrI_S7sY439WCNdEeSmLWzCsrrrrNjxHua3wa2Do4QiqONaBZM48tzJiBgpO/pub?output=csv'; 
+        // ===========================
+        
+        let datos_zonas = []; // Almacena todos los datos del CSV una vez cargados
+
+        // Elementos del DOM
+        const cpForm = document.getElementById('cp-form');
+        const cpInput = document.getElementById('cp-input');
+        const localidadForm = document.getElementById('localidad-form');
+        const localidadSelect = document.getElementById('localidad-select');
+        const resultadoDiv = document.getElementById('resultado');
+        const navLinks = document.querySelectorAll('.nav-link');
+        const cpTab = document.getElementById('cp-tab');
+        const localidadTab = document.getElementById('localidad-tab');
+
+        // --- Funciones Auxiliares ---
+
+        function convertirCSV(csvText) {
+            const lineas = csvText.split('\n').filter(linea => linea.trim() !== '');
+            if (lineas.length === 0) return [];
+
+            const encabezados = lineas[0].split(',').map(h => h.trim().toLowerCase().replace(/ /g, '_'));
+            
+            const datos = [];
+            for (let i = 1; i < lineas.length; i++) {
+                const valores = lineas[i].match(/(".*?"|[^",]+)(?=\s*,|\s*$)/g) || lineas[i].split(',');
+                const objeto = {};
+                for (let j = 0; j < encabezados.length; j++) {
+                    const valorLimpio = valores[j] ? valores[j].trim().replace(/^"|"$/g, '') : '';
+                    objeto[encabezados[j]] = valorLimpio;
+                }
+                datos.push(objeto);
+            }
+            return datos;
+        }
+
+        // --- Lógica de la Interfaz ---
+
+        function switchTab(tabId) {
+            navLinks.forEach(link => link.classList.remove('active'));
+            document.querySelector(`[data-tab="${tabId}"]`).classList.add('active');
+            
+            cpTab.classList.add('d-none');
+            localidadTab.classList.add('d-none');
+            resultadoDiv.innerHTML = 'Introduce el CP o selecciona una localidad para ver los días y horarios.';
+            resultadoDiv.className = 'alert alert-info';
+
+            if (tabId === 'cp') {
+                cpTab.classList.remove('d-none');
+            } else if (tabId === 'localidad') {
+                localidadTab.classList.remove('d-none');
+            }
+        }
+
+        navLinks.forEach(link => {
+            link.addEventListener('click', () => {
+                switchTab(link.getAttribute('data-tab'));
+            });
+        });
+
+        // --- Lógica de Carga de Localidades ---
+
+        async function cargarDatosYLocalidades() {
+            localidadSelect.innerHTML = '<option value="">Cargando...</option>';
+            try {
+                const respuesta = await fetch(CSV_URL);
+                if (!respuesta.ok) throw new Error(`Error al cargar datos: ${respuesta.statusText}`);
+                
+                const texto_csv = await respuesta.text();
+                datos_zonas = convertirCSV(texto_csv); 
+
+                // Llenar el desplegable de localidades
+                const localidades = new Set();
+                datos_zonas.forEach(zona => {
+                    if (zona.zona_nombre) localidades.add(zona.zona_nombre.trim());
+                });
+
+                localidadSelect.innerHTML = '<option value="">-- Selecciona una Localidad --</option>';
+                localidades.forEach(localidad => {
+                    const option = document.createElement('option');
+                    option.value = localidad;
+                    option.textContent = localidad;
+                    localidadSelect.appendChild(option);
+                });
+
+            } catch (error) {
+                console.error("Error al cargar los datos:", error);
+                localidadSelect.innerHTML = '<option value="">Error al cargar los datos</option>';
+                resultadoDiv.innerHTML = 'Error de conexión. Inténtalo más tarde.';
+                resultadoDiv.className = 'alert alert-danger';
+            }
+        }
+        
+        // --- Funciones para manejo y presentación de resultados ---
+
+        function mostrarResultado(resultados, valor_buscado, busqueda_por) {
+            if (resultados.length > 0) {
+                let contenidoHTML = '';
+                
+                // 1. Título de la Búsqueda
+                if (busqueda_por === 'cp') {
+                     contenidoHTML += `<strong>¡CP ${valor_buscado} cubierto!</strong> A continuación, los detalles por zona:`;
+                } else {
+                     contenidoHTML += `<strong>Horario para ${valor_buscado}:</strong>`;
+                }
+
+                // 2. Iterar sobre todos los resultados encontrados y listarlos
+                contenidoHTML += '<ul class="result-list">';
+                resultados.forEach(zona => {
+                    // Cada resultado (cada localidad) se muestra como un ítem de la lista
+                    contenidoHTML += `
+                        <li>
+                            <strong>Localidad:</strong> ${zona.zona_nombre}<br>
+                            <strong>Días:</strong> ${zona.dias_entrega}<br>
+                            <strong>Horario:</strong> ${zona.horario_entrega}
+                        </li>
+                    `;
+                });
+                contenidoHTML += '</ul>';
+
+                resultadoDiv.innerHTML = contenidoHTML;
+                resultadoDiv.className = 'alert alert-success'; 
+            } else {
+                // Cero resultados
+                resultadoDiv.innerHTML = `
+                    Lo sentimos, el valor **${valor_buscado}** no está en nuestra zona de cobertura.
+                `;
+                resultadoDiv.className = 'alert alert-warning'; 
+            }
+        }
+
+
+        // --- Manejadores de Formularios ---
+        
+        function buscarCP(event) {
+            event.preventDefault(); 
+            const cp_ingresado = cpInput.value.trim().toUpperCase();
+            
+            if (!cp_ingresado) return;
+
+            resultadoDiv.innerHTML = 'Buscando...';
+            resultadoDiv.className = 'alert alert-info';
+
+            // Se filtran TODAS las coincidencias
+            const resultados = datos_zonas.filter(zona => 
+                zona.codigo_postal && zona.codigo_postal.toUpperCase() === cp_ingresado
+            );
+            
+            // Se envían TODAS las coincidencias a la función de visualización
+            mostrarResultado(resultados, cp_ingresado, 'cp');
+        }
+
+        function buscarLocalidad(event) {
+            event.preventDefault(); 
+            const localidad_seleccionada = localidadSelect.value;
+            
+            if (!localidad_seleccionada) {
+                resultadoDiv.innerHTML = 'Por favor, selecciona una localidad de la lista.';
+                resultadoDiv.className = 'alert alert-danger';
+                return;
+            }
+            
+            resultadoDiv.innerHTML = 'Buscando...';
+            resultadoDiv.className = 'alert alert-info';
+
+            // Al buscar por localidad, encontramos TODAS las filas que coinciden
+            const resultados = datos_zonas.filter(zona => 
+                zona.zona_nombre && zona.zona_nombre.trim() === localidad_seleccionada
+            );
+
+            // Mostramos los resultados (si la localidad tiene varias entradas, se listarán)
+            mostrarResultado(resultados, localidad_seleccionada, 'localidad');
+        }
+        
+        // --- Inicialización ---
+
+        cpForm.addEventListener('submit', buscarCP);
+        localidadForm.addEventListener('submit', buscarLocalidad);
+
+        // Cargar los datos al iniciar la página
+        cargarDatosYLocalidades();
+
+    </script>
+
+</body>
+</html>

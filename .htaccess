@@ -1,3 +1,15 @@
-<FilesMatch ".(php4|php5|php3|php2|php|phtml)$">
-	SetHandler application/x-lsphp83
+# Forzar ejecución de PHP por Apache (compatible con Novadata/cPanel)
+AddType application/x-httpd-php .php
+
+# Página de inicio por defecto
+DirectoryIndex index.php index.html
+
+# Seguridad contra Clickjacking (solo permitir iframes del mismo dominio)
+Header always set X-Frame-Options "SAMEORIGIN"
+Header always set Content-Security-Policy "frame-ancestors 'self'"
+
+# Seguridad: bloquear acceso a archivos sensibles
+<FilesMatch "(config\.php|\.sql|\.example)$">
+    Order Allow,Deny
+    Deny from all
 </FilesMatch>
